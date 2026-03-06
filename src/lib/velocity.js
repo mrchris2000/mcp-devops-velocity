@@ -4,7 +4,10 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { config as loadEnv } from 'dotenv';
-import { fileURLToPath } from 'url';
+import { readFileSync } from 'fs';
+import { request as httpRequest } from 'http';
+import { request as httpsRequest } from 'https';
+import { fileURLToPath, URL } from 'url';
 import { dirname, join } from 'path';
 
 // Get the directory of the current file
@@ -14,38 +17,99 @@ const __dirname = dirname(__filename);
 // Load environment variables from .env file relative to this script's location
 loadEnv({ path: join(__dirname, '../../.env') });
 
+function parseBoolean(value) {
+    if (value === undefined || value === null || value === '') {
+        return undefined;
+    }
+
+    const normalizedValue = String(value).trim().toLowerCase();
+
+    if (['1', 'true', 'yes', 'on'].includes(normalizedValue)) {
+        return true;
+    }
+
+    if (['0', 'false', 'no', 'off'].includes(normalizedValue)) {
+        return false;
+    }
+
+    throw new Error(`Invalid boolean value: ${value}`);
+}
+
+function readArgumentValue(args, index, key) {
+    const value = args[index + 1];
+
+    if (!value || value.startsWith('--')) {
+        throw new Error(`${key} requires a value.`);
+    }
+
+    return value;
+}
+
+function debugLog(...args) {
+    if (!mcpConfig.debug) {
+        return;
+    }
+
+    console.error('[mcp-devops-velocity]', ...args);
+}
+
 // Configuration from environment variables or command line arguments
 function getConfig() {
     // Parse command line arguments
     const args = process.argv.slice(2);
     const config = {};
     
-    for (let i = 0; i < args.length; i += 2) {
+    for (let i = 0; i < args.length; i++) {
         const key = args[i];
-        const value = args[i + 1];
         
         switch (key) {
             case '--url':
-                config.url = value;
+                config.url = readArgumentValue(args, i, key);
+                i++;
                 break;
             case '--token':
-                config.token = value;
+                config.token = readArgumentValue(args, i, key);
+                i++;
                 break;
             case '--tenant-id':
-                config.tenantId = value;
+                config.tenantId = readArgumentValue(args, i, key);
+                i++;
                 break;
+            case '--allow-self-signed-cert':
+            case '--insecure': {
+                const nextValue = args[i + 1];
+                config.allowSelfSignedCerts = nextValue && !nextValue.startsWith('--')
+                    ? parseBoolean(nextValue)
+                    : true;
+                if (nextValue && !nextValue.startsWith('--')) {
+                    i++;
+                }
+                break;
+            }
+            case '--tls-ca-file':
+                config.tlsCaFile = readArgumentValue(args, i, key);
+                i++;
+                break;
+            case '--debug': {
+                const nextValue = args[i + 1];
+                config.debug = nextValue && !nextValue.startsWith('--')
+                    ? parseBoolean(nextValue)
+                    : true;
+                if (nextValue && !nextValue.startsWith('--')) {
+                    i++;
+                }
+                break;
+            }
         }
     }
     
-    // Environment variables take precedence if not provided via command line
+    // Environment variables are used when the corresponding CLI argument is not provided.
     const graphqlUrl = config.url || process.env.VELOCITY_GRAPHQL_URL;
     const accessToken = config.token || process.env.VELOCITY_ACCESS_TOKEN;
     const tenantId = config.tenantId || process.env.VELOCITY_TENANT_ID;
-    
-    console.log('🔍 MCP Config loaded:');
-    console.log('  - GraphQL URL:', graphqlUrl ? 'SET' : 'NOT SET');
-    console.log('  - Access Token:', accessToken ? 'SET (length: ' + accessToken.length + ')' : 'NOT SET');
-    console.log('  - Tenant ID:', tenantId ? 'SET' : 'NOT SET');
+    const allowSelfSignedCerts = config.allowSelfSignedCerts ?? parseBoolean(process.env.VELOCITY_ALLOW_SELF_SIGNED_CERTS) ?? false;
+    const tlsCaFile = config.tlsCaFile || process.env.VELOCITY_TLS_CA_FILE;
+    const debug = config.debug ?? parseBoolean(process.env.VELOCITY_DEBUG) ?? false;
     
     // Validate required configuration
     if (!graphqlUrl) {
@@ -57,12 +121,24 @@ function getConfig() {
     if (!tenantId) {
         throw new Error("Tenant ID is required. Set VELOCITY_TENANT_ID environment variable or use --tenant-id argument.");
     }
+
+    const tlsCaCert = tlsCaFile ? readFileSync(tlsCaFile, 'utf8') : undefined;
+
+    if (debug) {
+        console.error('[mcp-devops-velocity] MCP config loaded');
+        console.error('[mcp-devops-velocity] GraphQL URL:', graphqlUrl ? 'SET' : 'NOT SET');
+        console.error('[mcp-devops-velocity] Access token:', accessToken ? `SET (length: ${accessToken.length})` : 'NOT SET');
+        console.error('[mcp-devops-velocity] Tenant ID:', tenantId ? 'SET' : 'NOT SET');
+        console.error('[mcp-devops-velocity] Allow self-signed certs:', allowSelfSignedCerts ? 'true' : 'false');
+        console.error('[mcp-devops-velocity] TLS CA file:', tlsCaFile || 'NOT SET');
+    }
     
-    return { graphqlUrl, accessToken, tenantId };
+    return { graphqlUrl, accessToken, tenantId, allowSelfSignedCerts, tlsCaFile, tlsCaCert, debug };
 }
 
 // Get configuration at startup
-const { graphqlUrl, accessToken, tenantId } = getConfig();
+const mcpConfig = getConfig();
+const { graphqlUrl, accessToken, tenantId, allowSelfSignedCerts, tlsCaCert } = mcpConfig;
 
 // Create an MCP server
 const server = new McpServer({
@@ -72,9 +148,9 @@ const server = new McpServer({
 
 // Helper function to execute GraphQL queries
 async function executeGraphQL(query, variables = {}) {
-    console.log('🔍 executeGraphQL called with query:', query.split('\n')[1]?.trim());
-    console.log('🔍 Variables:', JSON.stringify(variables));
-    console.log('🔍 Access token type:', accessToken.includes('VelocitySession=') ? 'Session Cookie' : 'UserAccessKey');
+    debugLog('executeGraphQL called with query:', query.split('\n')[1]?.trim());
+    debugLog('Variables:', JSON.stringify(variables));
+    debugLog('Access token type:', accessToken.includes('VelocitySession=') ? 'Session Cookie' : 'UserAccessKey');
     
     try {
         // Check if accessToken looks like a cookie string
@@ -106,15 +182,15 @@ async function executeGraphQL(query, variables = {}) {
         }
 
         const data = await response.json();
-        console.log('🔍 Response data keys:', Object.keys(data));
-        console.log('🔍 Data.data keys:', data.data ? Object.keys(data.data) : 'data.data is undefined');
+        debugLog('Response data keys:', Object.keys(data));
+        debugLog('Data.data keys:', data.data ? Object.keys(data.data) : 'data.data is undefined');
         
         if (data.errors) {
-            console.log('🔍 GraphQL errors:', data.errors);
+            debugLog('GraphQL errors:', JSON.stringify(data.errors));
             throw new Error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
         }
         
-        console.log('🔍 Returning data.data:', !!data.data);
+        debugLog('Returning data.data:', !!data.data);
         return data.data;
     } catch (error) {
         console.error('GraphQL execution error:', error);
@@ -122,15 +198,73 @@ async function executeGraphQL(query, variables = {}) {
     }
 }
 
+function wrapNetworkError(error) {
+    if (!['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(error.code)) {
+        return error;
+    }
+
+    const message = [
+        `TLS certificate validation failed for ${graphqlUrl}.`,
+        'The server is presenting a self-signed or privately issued certificate that Node.js does not trust.',
+        'If your organization root CA is installed locally, start Node with NODE_OPTIONS=--use-system-ca.',
+        'Otherwise set VELOCITY_TLS_CA_FILE to a PEM file containing the trusted root/intermediate CA.',
+        'For non-production environments only, you can bypass validation with VELOCITY_ALLOW_SELF_SIGNED_CERTS=true or --allow-self-signed-cert.'
+    ].join(' ');
+
+    const wrappedError = new Error(message, { cause: error });
+    wrappedError.code = error.code;
+    return wrappedError;
+}
+
 // Helper function to attempt GraphQL request with specific headers
 async function attemptGraphQLRequest(query, variables, headers) {
-    return await fetch(graphqlUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-            query,
-            variables
-        })
+    const url = new URL(graphqlUrl);
+    const requestImplementation = url.protocol === 'https:' ? httpsRequest : httpRequest;
+    const body = JSON.stringify({
+        query,
+        variables
+    });
+
+    return await new Promise((resolve, reject) => {
+        const requestOptions = {
+            method: 'POST',
+            headers: {
+                ...headers,
+                'Content-Length': Buffer.byteLength(body)
+            }
+        };
+
+        if (url.protocol === 'https:') {
+            requestOptions.rejectUnauthorized = !allowSelfSignedCerts;
+            if (tlsCaCert) {
+                requestOptions.ca = tlsCaCert;
+            }
+        }
+
+        const req = requestImplementation(url, requestOptions, (res) => {
+            let responseBody = '';
+            res.setEncoding('utf8');
+
+            res.on('data', (chunk) => {
+                responseBody += chunk;
+            });
+
+            res.on('end', () => {
+                resolve({
+                    ok: (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300,
+                    status: res.statusCode ?? 0,
+                    text: async () => responseBody,
+                    json: async () => JSON.parse(responseBody)
+                });
+            });
+        });
+
+        req.on('error', (error) => {
+            reject(wrapNetworkError(error));
+        });
+
+        req.write(body);
+        req.end();
     });
 }
 

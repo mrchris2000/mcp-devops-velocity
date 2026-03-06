@@ -51,6 +51,7 @@ Set the following environment variables:
 export VELOCITY_GRAPHQL_URL="https://your-velocity-server.com/graphql"
 export VELOCITY_ACCESS_TOKEN="your_access_token_here"
 export VELOCITY_TENANT_ID="your-tenant-id-here"
+export VELOCITY_TLS_CA_FILE="/path/to/internal-root-ca.pem"
 ```
 
 ### Option 2: Command Line Arguments
@@ -58,7 +59,7 @@ export VELOCITY_TENANT_ID="your-tenant-id-here"
 Pass configuration as command line arguments:
 
 ```bash
-node src/lib/velocity.js --url "https://your-velocity-server.com/graphql" --token "your_token" --tenant-id "your-tenant-id"
+node src/lib/velocity.js --url "https://your-velocity-server.com/graphql" --token "your_token" --tenant-id "your-tenant-id" --tls-ca-file "/path/to/internal-root-ca.pem"
 ```
 
 ### Option 3: Environment File
@@ -69,7 +70,25 @@ Create a `.env` file with your Velocity configuration:
 VELOCITY_GRAPHQL_URL=https://your-velocity-server.com/graphql
 VELOCITY_ACCESS_TOKEN=your_access_token_here
 VELOCITY_TENANT_ID=your-tenant-id-here
+VELOCITY_TLS_CA_FILE=/path/to/internal-root-ca.pem
 ```
+
+### TLS for Internal Certificates
+
+If your Velocity server uses a self-signed or privately issued certificate, prefer one of these options:
+
+```bash
+# Recommended when your organization root CA is installed on the machine
+NODE_OPTIONS=--use-system-ca
+
+# Recommended when you have a PEM bundle for the issuing CA
+VELOCITY_TLS_CA_FILE=/path/to/internal-root-ca.pem
+
+# Last resort for non-production/testing only
+VELOCITY_ALLOW_SELF_SIGNED_CERTS=true
+```
+
+Optional debug logging can be enabled with `VELOCITY_DEBUG=true`. Debug output is sent to stderr so it does not corrupt MCP stdio traffic.
 
 ## Installation
 
@@ -100,7 +119,8 @@ Add the following to your Claude Desktop MCP configuration:
       "env": {
         "VELOCITY_GRAPHQL_URL": "https://your-velocity-server.com/graphql",
         "VELOCITY_ACCESS_TOKEN": "your_access_token_here",
-        "VELOCITY_TENANT_ID": "your-tenant-id-here"
+        "VELOCITY_TENANT_ID": "your-tenant-id-here",
+        "VELOCITY_TLS_CA_FILE": "/path/to/internal-root-ca.pem"
       }
     }
   }
@@ -118,7 +138,8 @@ Add the following to your Claude Desktop MCP configuration:
         "/path/to/mcp-devops-velocity/src/lib/velocity.js",
         "--url", "https://your-velocity-server.com/graphql",
         "--token", "your_access_token_here",
-        "--tenant-id", "your-tenant-id-here"
+        "--tenant-id", "your-tenant-id-here",
+        "--tls-ca-file", "/path/to/internal-root-ca.pem"
       ]
     }
   }
